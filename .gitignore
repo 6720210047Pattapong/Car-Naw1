@@ -4,5 +4,13 @@ dist/
 coverage/
 .DS_Store
 *.log
-.env*
+
+# ซ่อน .env จริง (มี password/secrets)
+.env
 !.env.example
+
+# ไม่ต้อง push ไฟล์ temp
+FIX_NOTES.js
+start.bat
+test-*.js
+test-*.ts

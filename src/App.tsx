@@ -73,7 +73,15 @@ export default function App() {
     const saved = localStorage.getItem('booking_sys_active_user');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        // Validate user ID must be numeric (DB uses INT) — clear stale data if not
+        if (parsed && parsed.id && !isNaN(parseInt(String(parsed.id), 10))) {
+          return parsed;
+        } else {
+          // ID เก่าแบบ 'student-1' ใช้ไม่ได้กับ DB — force re-login
+          console.warn('[App] Stale user ID in localStorage, clearing for fresh login');
+          localStorage.removeItem('booking_sys_active_user');
+        }
       } catch (e) {
         console.error(e);
       }
@@ -194,8 +202,16 @@ export default function App() {
     }
   }, [currentUser]);
 
+  // DB status state
+  const [dbStatus, setDbStatus] = useState<'checking' | 'ok' | 'error'>('checking');
+
   // Fetch vehicles, bookings, and notifications from the MySQL API on mount or user changes
   useEffect(() => {
+    // Check DB health first
+    api.checkHealth().then(health => {
+      setDbStatus(health.db === 'connected' ? 'ok' : 'error');
+    }).catch(() => setDbStatus('error'));
+
     if (currentUser) {
       const loadInitialData = async () => {
         try {
@@ -396,8 +412,10 @@ export default function App() {
       setAlertMsg({ type: 'success', text: t('bookingSuccess') });
       setCurrentTab('bookings');
     } catch (err: any) {
-      console.error(err);
-      setAlertMsg({ type: 'error', text: lang === 'th' ? 'เกิดข้อผิดพลาดในการส่งคำขอจองคิวรถ' : err.message });
+      console.error('[Booking Error]', err);
+      // แสดง error จริงจาก server แทนที่จะซ่อน
+      const errMsg = err?.message || (lang === 'th' ? 'เกิดข้อผิดพลาดในการส่งคำขอจองคิวรถ' : 'Booking request failed');
+      setAlertMsg({ type: 'error', text: errMsg });
     }
   };
 
@@ -678,9 +696,21 @@ export default function App() {
               <h1 className="font-bold text-lg leading-none text-slate-900 font-heading tracking-tight flex items-center gap-2">
                 <span>{t('appTitle')}</span>
               </h1>
-              <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold block mt-0.5">{t('appSubtitle')}</span>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">{t('appSubtitle')}</span>
+                {/* DB Status Badge */}
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full flex items-center gap-1 ${
+                  dbStatus === 'ok' ? 'bg-emerald-100 text-emerald-700' :
+                  dbStatus === 'error' ? 'bg-red-100 text-red-700' :
+                  'bg-slate-100 text-slate-500'
+                }`} title="Database connection status">
+                  <span className={`w-1.5 h-1.5 rounded-full ${dbStatus === 'ok' ? 'bg-emerald-500' : dbStatus === 'error' ? 'bg-red-500' : 'bg-slate-400'}`}></span>
+                  {dbStatus === 'ok' ? 'DB Connected' : dbStatus === 'error' ? 'DB Offline' : 'DB...'}
+                </span>
+              </div>
             </div>
           </div>
+
 
           {/* Right Header Navigation */}
           <div className="flex items-center space-x-4">

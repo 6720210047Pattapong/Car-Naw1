@@ -1,5 +1,9 @@
 import express from "express";
 import mysql from "mysql2/promise";
+import dotenv from "dotenv";
+
+// Load .env variables
+dotenv.config({ override: true });
 
 // Prevent crashes from unhandled errors
 process.on('uncaughtException', (err) => {
@@ -12,6 +16,15 @@ process.on('unhandledRejection', (reason) => {
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// CORS Middleware — อนุญาต frontend ทุก port ในเครื่อง
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, x-user-id, x-user-role');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+});
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
@@ -32,9 +45,14 @@ pool.getConnection()
     .then(async (conn) => {
         await conn.query("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
         conn.release();
-        console.log('MySQL connected with utf8mb4 charset ✓');
+        console.log('✅ MySQL connected with utf8mb4 charset');
+        console.log(`   Host: ${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || 3008}`);
+        console.log(`   DB:   ${process.env.DB_NAME || 'earth_db'}`);
     })
-    .catch((err) => console.error('[DB] Connection failed:', err.message));
+    .catch((err) => {
+        console.error('[DB] ❌ Connection failed:', err.message);
+        console.error('   ตรวจสอบการตั้งค่าใน .env และตรวจสอบว่า MySQL กำลังทำงานอยู่');
+    });
 
 // Helper: Format Date as YYYY-MM-DD
 const formatDate = (dateVal) => {
@@ -104,7 +122,15 @@ function mapNotification(row) {
 }
 
 app.get("/", (req, res) => {
-    res.send("University Car Booking System API Running...");
+    res.json({
+        status: "ok",
+        message: "University Car Booking System API Running",
+        db: {
+            host: process.env.DB_HOST || 'localhost',
+            port: process.env.DB_PORT || 3008,
+            name: process.env.DB_NAME || 'earth_db'
+        }
+    });
 });
 
 // ----------------------------------------------------
@@ -113,50 +139,56 @@ app.get("/", (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
+    if (!email || !password) {
+        return res.status(400).json({ message: "กรุณากรอกอีเมลและรหัสผ่าน" });
+    }
     try {
-        const [rows] = await pool.query("SELECT * FROM users WHERE email = ?", [email]);
+        const [rows] = await pool.query("SELECT * FROM users WHERE email = ?", [email.trim().toLowerCase()]);
         if (rows.length === 0) {
-            return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง / User not found" });
+            return res.status(401).json({ message: "ไม่พบอีเมลนี้ในระบบ" });
         }
         const user = rows[0];
-        // For simplicity, directly checking the password string
         if (user.password !== password) {
-            return res.status(401).json({ message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง / Password mismatch" });
+            return res.status(401).json({ message: "รหัสผ่านไม่ถูกต้อง" });
         }
         res.json({
             id: String(user.id),
             name: user.fullname,
             email: user.email,
-            phone: user.phone,
+            phone: user.phone || '',
             role: user.role
         });
     } catch (err) {
-        console.error(err);
+        console.error('[login]', err);
         res.status(500).json({ message: err.message });
     }
 });
 
 app.post("/api/auth/register", async (req, res) => {
     const { name, email, phone, role, password } = req.body;
+    if (!name || !email || !password) {
+        return res.status(400).json({ message: "กรุณากรอกข้อมูลให้ครบ (ชื่อ, อีเมล, รหัสผ่าน)" });
+    }
     try {
-        const [exists] = await pool.query("SELECT id FROM users WHERE email = ?", [email]);
+        const normalizedEmail = email.trim().toLowerCase();
+        const [exists] = await pool.query("SELECT id FROM users WHERE email = ?", [normalizedEmail]);
         if (exists.length > 0) {
             return res.status(400).json({ message: "อีเมลนี้ได้รับการลงทะเบียนในระบบแล้ว" });
         }
-        const username = email.split('@')[0];
+        const username = normalizedEmail.split('@')[0];
         const [result] = await pool.query(
             "INSERT INTO users (username, email, password, fullname, phone, role) VALUES (?, ?, ?, ?, ?, ?)",
-            [username, email, password, name, phone, role]
+            [username, normalizedEmail, password, name, phone || '', role || 'student']
         );
         res.status(201).json({
             id: String(result.insertId),
             name,
-            email,
-            phone,
-            role
+            email: normalizedEmail,
+            phone: phone || '',
+            role: role || 'student'
         });
     } catch (err) {
-        console.error(err);
+        console.error('[register]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -167,10 +199,10 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.get("/api/vehicles", async (req, res) => {
     try {
-        const [rows] = await pool.query("SELECT * FROM vehicles");
+        const [rows] = await pool.query("SELECT * FROM vehicles ORDER BY created_at ASC");
         res.json(rows.map(mapVehicle));
     } catch (err) {
-        console.error(err);
+        console.error('[GET /api/vehicles]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -181,12 +213,12 @@ app.post("/api/vehicles", async (req, res) => {
     try {
         await pool.query(
             "INSERT INTO vehicles (id, model_th, model_en, plate_number, type, capacity, status, driver_name_th, driver_name_en, driver_phone, fuel_type_th, fuel_type_en) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [vehicleId, modelTh, modelEn, plateNumber, type, capacity, status, driverNameTh, driverNameEn, driverPhone, fuelTypeTh, fuelTypeEn]
+            [vehicleId, modelTh, modelEn, plateNumber, type, capacity || 10, status || 'available', driverNameTh || '', driverNameEn || '', driverPhone || '', fuelTypeTh || '', fuelTypeEn || '']
         );
         const [rows] = await pool.query("SELECT * FROM vehicles WHERE id = ?", [vehicleId]);
         res.status(201).json(mapVehicle(rows[0]));
     } catch (err) {
-        console.error(err);
+        console.error('[POST /api/vehicles]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -195,15 +227,17 @@ app.put("/api/vehicles/:id", async (req, res) => {
     const { id } = req.params;
     const { modelTh, modelEn, plateNumber, type, capacity, status, driverNameTh, driverNameEn, driverPhone, fuelTypeTh, fuelTypeEn } = req.body;
     try {
+        const [check] = await pool.query("SELECT id FROM vehicles WHERE id = ?", [id]);
+        if (check.length === 0) return res.status(404).json({ message: "ไม่พบยานพาหนะที่ต้องการแก้ไข" });
+
         await pool.query(
             "UPDATE vehicles SET model_th = ?, model_en = ?, plate_number = ?, type = ?, capacity = ?, status = ?, driver_name_th = ?, driver_name_en = ?, driver_phone = ?, fuel_type_th = ?, fuel_type_en = ? WHERE id = ?",
-            [modelTh, modelEn, plateNumber, type, capacity, status, driverNameTh, driverNameEn, driverPhone, fuelTypeTh, fuelTypeEn, id]
+            [modelTh, modelEn, plateNumber, type, capacity, status, driverNameTh || '', driverNameEn || '', driverPhone || '', fuelTypeTh || '', fuelTypeEn || '', id]
         );
         const [rows] = await pool.query("SELECT * FROM vehicles WHERE id = ?", [id]);
-        if (rows.length === 0) return res.status(404).json({ message: "Vehicle not found" });
         res.json(mapVehicle(rows[0]));
     } catch (err) {
-        console.error(err);
+        console.error('[PUT /api/vehicles/:id]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -211,19 +245,17 @@ app.put("/api/vehicles/:id", async (req, res) => {
 app.delete("/api/vehicles/:id", async (req, res) => {
     const { id } = req.params;
     try {
-        // Check if vehicle has any future approved bookings
         const [activeBookings] = await pool.query(
-            "SELECT id FROM bookings WHERE vehicle_id = ? AND status = 'approved' AND end_date >= CURDATE()",
+            "SELECT id FROM bookings WHERE vehicle_id = ? AND status IN ('approved', 'pending') AND end_date >= CURDATE()",
             [id]
         );
         if (activeBookings.length > 0) {
-            return res.status(400).json({ message: "ไม่สามารถลบรถได้ เนื่องจากมีตารางการจองที่อนุมัติแล้วรอใช้งานอยู่ / Vehicle has active future bookings" });
+            return res.status(400).json({ message: "ไม่สามารถลบรถได้ เนื่องจากมีตารางการจองที่รออยู่หรืออนุมัติแล้ว" });
         }
-
         await pool.query("DELETE FROM vehicles WHERE id = ?", [id]);
         res.json({ success: true });
     } catch (err) {
-        console.error(err);
+        console.error('[DELETE /api/vehicles/:id]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -236,32 +268,49 @@ app.get("/api/bookings", async (req, res) => {
     const userId = req.headers['x-user-id'];
     const userRole = req.headers['x-user-role'];
     try {
-        let query = "SELECT * FROM bookings ORDER BY start_date DESC, id DESC";
-        let params = [];
-        if (userRole !== 'admin' && userId) {
-            query = "SELECT * FROM bookings WHERE user_id = ? ORDER BY start_date DESC, id DESC";
+        let query, params = [];
+        if (userRole === 'admin') {
+            query = "SELECT * FROM bookings ORDER BY created_at DESC, id DESC";
+        } else if (userId) {
+            query = "SELECT * FROM bookings WHERE user_id = ? ORDER BY created_at DESC, id DESC";
             params = [userId];
+        } else {
+            return res.json([]);
         }
         const [rows] = await pool.query(query, params);
         res.json(rows.map(mapBooking));
     } catch (err) {
-        console.error(err);
+        console.error('[GET /api/bookings]', err);
         res.status(500).json({ message: err.message });
     }
 });
 
 app.post("/api/bookings", async (req, res) => {
-    const { id, vehicleId, userId, userName, userRole, userPhone, purpose, destination, startDate, endDate, startTime, endTime, passengers, notes } = req.body;
+    const {
+        id, vehicleId, userId, userName, userRole, userPhone,
+        purpose, destination, startDate, endDate, startTime, endTime,
+        passengers, notes
+    } = req.body;
+
+    // Validate required fields
+    if (!vehicleId || !userId || !userName || !userRole || !purpose || !destination || !startDate || !endDate || !startTime || !endTime) {
+        return res.status(400).json({ message: "กรุณากรอกข้อมูลการจองให้ครบถ้วน" });
+    }
+
+    // Convert userId to integer (DB expects INT)
+    const userIdInt = parseInt(userId, 10);
+    if (isNaN(userIdInt)) {
+        return res.status(400).json({ message: "รหัสผู้ใช้ไม่ถูกต้อง — กรุณาเข้าสู่ระบบใหม่" });
+    }
+
     const bookingId = id || `booking-${Date.now()}`;
+    // Staff gets auto-approved, others are pending
     const status = userRole === 'staff' ? 'approved' : 'pending';
+
     try {
-        // Overlap checks
-        // An overlap exists if:
-        // (startA < endB) AND (endA > startB)
-        // With timestamps: start = `${startDate}T${startTime}`, end = `${endDate}T${endTime}`
-        // In SQL, we can construct datetime or date/time comparisons
+        // Check for booking conflicts (time overlap)
         const [conflicts] = await pool.query(
-            `SELECT * FROM bookings 
+            `SELECT id FROM bookings 
              WHERE vehicle_id = ? 
              AND status IN ('pending', 'approved') 
              AND NOT (
@@ -270,96 +319,118 @@ app.post("/api/bookings", async (req, res) => {
                  OR (end_date = ? AND end_time <= ?) 
                  OR (start_date = ? AND start_time >= ?)
              )`,
-            [vehicleId, startDate, endDate, startDate, startTime + ':00', endDate, endTime + ':00']
+            [
+                vehicleId,
+                startDate, endDate,
+                startDate, startTime + ':00',
+                endDate, endTime + ':00'
+            ]
         );
 
         if (conflicts.length > 0) {
-            return res.status(400).json({ message: "ขออภัย ยานพาหนะนี้ถูกจองคาบเกี่ยวเวลาเดียวกันไปแล้ว" });
+            return res.status(400).json({ message: "ขออภัย ยานพาหนะนี้ถูกจองในช่วงเวลาดังกล่าวไปแล้ว" });
         }
 
+        // ✅ FIX: ใส่ status ในค่า VALUES ด้วย (bug เดิมลืมใส่)
         await pool.query(
-            "INSERT INTO bookings (id, vehicle_id, user_id, user_name, user_role, user_phone, purpose, destination, start_date, end_date, start_time, end_time, passengers, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [bookingId, vehicleId, userId, userName, userRole, userPhone, purpose, destination, startDate, endDate, startTime, endTime, passengers, notes || null]
+            `INSERT INTO bookings 
+             (id, vehicle_id, user_id, user_name, user_role, user_phone, purpose, destination, start_date, end_date, start_time, end_time, passengers, status, notes) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                bookingId, vehicleId, userIdInt, userName, userRole, userPhone || '',
+                purpose, destination, startDate, endDate,
+                startTime, endTime,
+                parseInt(passengers) || 1,
+                status,        // ← ค่า status ที่ถูกลืมในเวอร์ชันเก่า!
+                notes || null
+            ]
         );
 
-        // Notifications dispatch
-        const formattedCarResult = await pool.query("SELECT plate_number FROM vehicles WHERE id = ?", [vehicleId]);
-        const carPlate = formattedCarResult[0].length > 0 ? formattedCarResult[0][0].plate_number : '';
+        // --- ส่ง Notification ให้ผู้จอง ---
+        const [vehicleRows] = await pool.query("SELECT plate_number FROM vehicles WHERE id = ?", [vehicleId]);
+        const carPlate = vehicleRows.length > 0 ? vehicleRows[0].plate_number : vehicleId;
 
-        // 1. User Notification
         const userNotiId = `noti-u-${Date.now()}`;
-        const notiUserMsgTh = status === 'approved' 
-            ? `อนุมัติการจองพาหนะเรียบร้อย` 
-            : `ยื่นคำขอจองคิวรถสำเร็จ`;
-        const notiUserMsgEn = status === 'approved'
-            ? `Vehicle Booking Approved`
-            : `Booking Request Submitted`;
-        
-        const notiUserDetailTh = status === 'approved'
-            ? `การจองรถ ${carPlate} สำหรับเดินทางไป "${destination}" ได้รับการอนุมัติแล้ว`
-            : `คุณได้ยื่นคำขอจองรถ ${carPlate} เพื่อเดินทางไป "${destination}" เรียบร้อยแล้ว ขณะนี้อยู่ระหว่างรอผู้ดูแลระบบตรวจสอบ`;
-        const notiUserDetailEn = status === 'approved'
-            ? `Your booking for vehicle ${carPlate} to "${destination}" has been approved.`
-            : `Your booking request for ${carPlate} to "${destination}" has been submitted and is pending administrator approval.`;
+        const notiTitleTh = status === 'approved' ? 'อนุมัติการจองพาหนะเรียบร้อย' : 'ยื่นคำขอจองรถสำเร็จ';
+        const notiTitleEn = status === 'approved' ? 'Vehicle Booking Approved' : 'Booking Request Submitted';
+        const notiMsgTh = status === 'approved'
+            ? `การจองรถ ${carPlate} ไป "${destination}" ได้รับการอนุมัติแล้ว`
+            : `คุณยื่นคำขอจองรถ ${carPlate} ไป "${destination}" เรียบร้อย รอผู้ดูแลระบบตรวจสอบ`;
+        const notiMsgEn = status === 'approved'
+            ? `Your booking for ${carPlate} to "${destination}" has been approved.`
+            : `Your booking request for ${carPlate} to "${destination}" has been submitted and is pending approval.`;
 
         await pool.query(
             "INSERT INTO notifications (id, user_id, title_th, title_en, message_th, message_en, type, is_read) VALUES (?, ?, ?, ?, ?, ?, 'info', FALSE)",
-            [userNotiId, userId, notiUserMsgTh, notiUserMsgEn, notiUserDetailTh, notiUserDetailEn]
+            [userNotiId, userIdInt, notiTitleTh, notiTitleEn, notiMsgTh, notiMsgEn]
         );
 
-        // 2. Admin Notification
+        // --- ส่ง Notification ให้ Admin ทุกคน ---
         const [admins] = await pool.query("SELECT id FROM users WHERE role = 'admin'");
-        const adminNotiId = `noti-a-${Date.now()}`;
         for (const admin of admins) {
+            const adminNotiId = `noti-a-${Date.now()}-${admin.id}`;
             await pool.query(
                 "INSERT INTO notifications (id, user_id, title_th, title_en, message_th, message_en, type, is_read) VALUES (?, ?, ?, ?, ?, ?, 'info', FALSE)",
-                [adminNotiId + '-' + admin.id, admin.id, `คำขอจองคิวรถใหม่ (${carPlate})`, `New booking request (${carPlate})`, `${userName} ได้ส่งยื่นข้อคำขอจองใช้รถ มุ่งหน้าสู่ "${destination}"`, `${userName} submitted a request to travel to "${destination}"`]
+                [
+                    adminNotiId, admin.id,
+                    `คำขอจองรถใหม่ (${carPlate})`, `New Booking Request (${carPlate})`,
+                    `${userName} ส่งคำขอจองรถมุ่งหน้าสู่ "${destination}"`,
+                    `${userName} submitted a booking request to travel to "${destination}"`
+                ]
             );
         }
 
         const [rows] = await pool.query("SELECT * FROM bookings WHERE id = ?", [bookingId]);
         res.status(201).json(mapBooking(rows[0]));
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: err.message });
+        console.error('[POST /api/bookings]', err);
+        res.status(500).json({ message: `เกิดข้อผิดพลาดในฐานข้อมูล: ${err.message}` });
     }
 });
 
 app.put("/api/bookings/:id/status", async (req, res) => {
     const { id } = req.params;
     const { status, notes } = req.body;
+
+    if (!status) return res.status(400).json({ message: "กรุณาระบุสถานะ" });
+
     try {
         const [bookings] = await pool.query("SELECT * FROM bookings WHERE id = ?", [id]);
-        if (bookings.length === 0) return res.status(404).json({ message: "Booking not found" });
+        if (bookings.length === 0) return res.status(404).json({ message: "ไม่พบรายการจองนี้" });
         const booking = bookings[0];
 
         await pool.query(
             "UPDATE bookings SET status = ?, notes = ? WHERE id = ?",
-            [status, notes || null, id]
+            [status, notes || booking.notes || null, id]
         );
 
-        // Retrieve vehicle plate
         const [vehicles] = await pool.query("SELECT plate_number FROM vehicles WHERE id = ?", [booking.vehicle_id]);
-        const carPlate = vehicles.length > 0 ? vehicles[0].plate_number : '';
+        const carPlate = vehicles.length > 0 ? vehicles[0].plate_number : booking.vehicle_id;
 
-        // Add Notification for the owner
-        const thTitle = status === 'approved' ? 'อนุมัติการจองพาหนะแล้ว' : status === 'rejected' ? 'ปฏิเสธคำขอจองคิวรถ' : 'คำขอจองรถยกเลิกแล้ว';
-        const enTitle = status === 'approved' ? 'Booking Request Approved' : status === 'rejected' ? 'Booking Request Rejected' : 'Booking Cancelled';
-        
-        const thMsg = status === 'approved' 
-          ? `การจองใช้ยานพาหนะเลขทะเบียน ${carPlate} เพื่อเดินทางไป "${booking.destination}" ได้รับการพิจารณาอนุมัติเรียบร้อยโดยผู้จัดระบบ พนักงานขับรถจะติดต่อคุณโดยเร็ว`
-          : `การจองใช้ยานพาหนะเลขอักษร ${carPlate} ได้รับการปฏิเสธ เนื่องจาก: "${notes || 'ข้อมูลยังไม่เพียงพอ'}"`;
+        const thTitle = status === 'approved' ? 'อนุมัติการจองพาหนะแล้ว'
+            : status === 'rejected' ? 'ปฏิเสธคำขอจองรถ'
+            : 'ยกเลิกการจองรถแล้ว';
+        const enTitle = status === 'approved' ? 'Booking Approved'
+            : status === 'rejected' ? 'Booking Rejected'
+            : 'Booking Cancelled';
+        const thMsg = status === 'approved'
+            ? `การจองรถ ${carPlate} ไป "${booking.destination}" ได้รับการอนุมัติแล้ว คนขับจะติดต่อคุณเร็วๆ นี้`
+            : `การจองรถ ${carPlate} ถูก${status === 'rejected' ? 'ปฏิเสธ' : 'ยกเลิก'} เหตุผล: "${notes || 'ไม่ระบุ'}"`;
         const enMsg = status === 'approved'
-          ? `Your booking for vehicle ${carPlate} to "${booking.destination}" is approved. Our driver will contact you shortly.`
-          : `Your booking for vehicle ${carPlate} was rejected due to: "${notes || 'No reason provided'}"`;
+            ? `Your booking for ${carPlate} to "${booking.destination}" has been approved. The driver will contact you shortly.`
+            : `Your booking for ${carPlate} was ${status}. Reason: "${notes || 'Not specified'}"`;
 
         const userNotiId = `noti-${Date.now()}`;
         await pool.query(
             "INSERT INTO notifications (id, user_id, title_th, title_en, message_th, message_en, type, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, FALSE)",
-            [userNotiId, booking.user_id, thTitle, enTitle, thMsg, enMsg, status === 'approved' ? 'success' : status === 'rejected' ? 'error' : 'warning']
+            [
+                userNotiId, booking.user_id,
+                thTitle, enTitle, thMsg, enMsg,
+                status === 'approved' ? 'success' : status === 'rejected' ? 'error' : 'warning'
+            ]
         );
 
-        // Update Fleet Vehicle Busy Status temporarily if approved for currently active date range
+        // อัปเดตสถานะรถ
         if (status === 'approved') {
             const today = new Date().toISOString().split('T')[0];
             const startDateStr = formatDate(booking.start_date);
@@ -368,14 +439,13 @@ app.put("/api/bookings/:id/status", async (req, res) => {
                 await pool.query("UPDATE vehicles SET status = 'busy' WHERE id = ?", [booking.vehicle_id]);
             }
         } else if (status === 'cancelled' || status === 'rejected') {
-            // Revert busy state if needed
             await pool.query("UPDATE vehicles SET status = 'available' WHERE id = ? AND status = 'busy'", [booking.vehicle_id]);
         }
 
         const [rows] = await pool.query("SELECT * FROM bookings WHERE id = ?", [id]);
         res.json(mapBooking(rows[0]));
     } catch (err) {
-        console.error(err);
+        console.error('[PUT /api/bookings/:id/status]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -394,7 +464,7 @@ app.get("/api/notifications", async (req, res) => {
         );
         res.json(rows.map(mapNotification));
     } catch (err) {
-        console.error(err);
+        console.error('[GET /api/notifications]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -402,11 +472,11 @@ app.get("/api/notifications", async (req, res) => {
 app.put("/api/notifications/read", async (req, res) => {
     const userId = req.headers['x-user-id'];
     try {
-        if (!userId) return res.status(400).json({ message: "Missing user identification header" });
+        if (!userId) return res.status(400).json({ message: "Missing x-user-id header" });
         await pool.query("UPDATE notifications SET is_read = TRUE WHERE user_id = ?", [userId]);
         res.json({ success: true });
     } catch (err) {
-        console.error(err);
+        console.error('[PUT /api/notifications/read]', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -414,16 +484,40 @@ app.put("/api/notifications/read", async (req, res) => {
 app.delete("/api/notifications", async (req, res) => {
     const userId = req.headers['x-user-id'];
     try {
-        if (!userId) return res.status(400).json({ message: "Missing user identification header" });
+        if (!userId) return res.status(400).json({ message: "Missing x-user-id header" });
         await pool.query("DELETE FROM notifications WHERE user_id = ?", [userId]);
         res.json({ success: true });
     } catch (err) {
-        console.error(err);
+        console.error('[DELETE /api/notifications]', err);
         res.status(500).json({ message: err.message });
     }
 });
 
-const PORT = 5001;
+// ----------------------------------------------------
+// Health Check API
+// ----------------------------------------------------
+app.get("/api/health", async (req, res) => {
+    try {
+        const conn = await pool.getConnection();
+        const [result] = await conn.query("SELECT 1 AS ok, NOW() AS time");
+        conn.release();
+        res.json({
+            status: "ok",
+            db: "connected",
+            time: result[0].time,
+            env: {
+                host: process.env.DB_HOST || 'localhost',
+                port: process.env.DB_PORT || 3008,
+                name: process.env.DB_NAME || 'earth_db',
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ status: "error", db: "disconnected", error: err.message });
+    }
+});
+
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`\n🚀 Server running on http://localhost:${PORT}`);
+    console.log(`   Health check: http://localhost:${PORT}/api/health\n`);
 });
