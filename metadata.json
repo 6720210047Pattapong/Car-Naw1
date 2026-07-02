@@ -1,0 +1,6 @@
+{
+  "name": "Car Booking System",
+  "description": "ระบบจองรถสำหรับนักศึกษาและบุคลากร สามารถจองยานพาหนะ ค้นหา ตรวจสอบสถานะ และจัดการสถิติการใช้งานได้อย่างง่ายดาย",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
